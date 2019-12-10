@@ -1,6 +1,23 @@
 ################################
 # Capstone Code
 ################################
+#
+# NOTE:
+#
+# The code here is essentially the same as in the Rmarkdown document.
+# There are some testings that are not in the Rmd file,
+# for example, the recommenderlab package testing and other ML 
+# algorithms, such as knn, random trees and regression trees.
+# The Rmd doc takes around 2 hours to run in my laptop.
+# I know there are some spelling and grammar errors and some
+# parts needs better explanation, but due to lack of time
+# (I need to finish the other capstone project), I'll leave
+# this code and report as is. If you find any bug, please
+# report in github. I hope you learn something from this code
+# and report, so at least my effort was worthwhile.
+# 
+################################
+# 
 # Create Train and Validation Sets
 # You will use the following code to generate your datasets. 
 # Develop your algorithm using the 'edx' set. 
@@ -114,6 +131,9 @@ head(edx)
 # genres: character
 # 
 
+#-----------------
+# Genres exploration
+#-----------------
 # Now let's check the "genres" column.
 # There are 797 combinations of genres:
 length(unique(edx$genres))
@@ -159,10 +179,93 @@ tibble(cnt = str_count(train_set$genres, fixed("|")),
 length(unique(edx$rating))
 
 
+#-----------------
+# Date explorationg
+#-----------------
 # Convert timestamp into date format
+library(lubridate)
 edx <- mutate(edx, date = as_datetime(timestamp))
 
-# Show the map of users x movies
+# Check the range period of ratings
+tibble(`Initial Date` = date(as_datetime(min(edx$timestamp), origin="1970-01-01")),
+       `Final Date` = date(as_datetime(max(edx$timestamp), origin="1970-01-01"))) %>%
+  mutate(Period = duration(max(edx$timestamp)-min(edx$timestamp)))
+
+# Plot histogram of rating distribution over the years
+if(!require(ggthemes))
+  install.packages("ggthemes", repos = "http://cran.us.r-project.org")
+if(!require(scales))
+  install.packages("scales", repos = "http://cran.us.r-project.org")
+edx %>% mutate(year = year(as_datetime(timestamp, origin="1970-01-01"))) %>%
+  ggplot(aes(x=year)) +
+  geom_histogram(color = "white") +
+  ggtitle("Rating Distribution Per Year") +
+  xlab("Year") +
+  ylab("Number of Ratings") +
+  scale_y_continuous(labels = comma) +
+  theme_economist()
+
+# Dates with more ratings
+edx %>% mutate(date = date(as_datetime(timestamp, origin="1970-01-01"))) %>%
+  group_by(date, title) %>%
+  summarise(count = n()) %>%
+  arrange(-count) %>%
+  head(10)
+
+#-----------------
+# Ratings explorationg
+#-----------------
+# Count the number of all ratings:
+edx %>% group_by(rating) %>% summarize(n=n())
+
+# Chart with distribution of each rating
+edx %>% group_by(rating) %>%
+  summarise(count=n()) %>%
+  ggplot(aes(x=rating, y=count)) +
+  geom_line() +
+  geom_point() +
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+                labels = trans_format("log10", math_format(10^.x))) +
+  ggtitle("Rating Distribution", subtitle = "Higher ratings are prevalent.") +
+  xlab("Rating") +
+  ylab("Count") +
+  theme_economist()
+
+#-----------------
+# Movies exploration
+#-----------------
+# How many different movies are in the 'edx' set?
+length(unique(edx$movieId))
+
+# Distribution of movies: Movies rated more than others (histogram)
+edx %>% group_by(movieId) %>%
+  summarise(n=n()) %>%
+  ggplot(aes(n)) +
+  geom_histogram(bin = 30, color = "white") +
+  scale_x_log10() + 
+  ggtitle("Movies")
+
+#-----------------
+# Users exploration
+#-----------------
+# Distribution of users
+edx %>% group_by(userId) %>%
+  summarise(n=n()) %>%
+  arrange(n) %>%
+  head()
+
+# How many different users are in the 'edx' set?
+length(unique(edx$userId))
+
+# Distribution of users rating movies (historgram)
+edx %>% group_by(userId) %>%
+  summarise(n=n()) %>%
+  ggplot(aes(n)) +
+  geom_histogram(bin = 30, color = "white") +
+  scale_x_log10() + 
+  ggtitle("Users")
+
+# Show the heat map of users x movies
 users <- sample(unique(edx$userId), 100)
 edx %>% filter(userId %in% users) %>%
   select(userId, movieId, rating) %>%
@@ -173,43 +276,62 @@ edx %>% filter(userId %in% users) %>%
   image(1:100, 1:100,. , xlab="Movies", ylab="Users")
 abline(h=0:100+0.5, v=0:100+0.5, col = "grey")
 
-
-# Count the number of all ratings:
-edx %>% group_by(rating) %>% summarize(n=n())
-
-# How many different movies are in the 'edx' set?
-length(unique(edx$movieId))
-
-# How many different users are in the 'edx' set?
-length(unique(edx$userId))
-
-# Distribution of movies: Movies rated more than others (histogram)
-edx %>% group_by(movieId) %>%
-  summarise(n=n()) %>%
-  ggplot(aes(n)) +
-  geom_histogram(bin = 30, color = "white") +
-  scale_x_log10() + 
-  ggtitle("Movies")
-
-# Distribution of users rating movies (historgram)
-edx %>% group_by(userId) %>%
-  summarise(n=n()) %>%
-  ggplot(aes(n)) +
-  geom_histogram(bin = 30, color = "white") +
-  scale_x_log10() + 
-  ggtitle("Users")
+################################
+##  Data Cleaning
+################################
+# This step is optional. Remove genres and timestamp, since 
+# we'll not use them.
+train_set <- train_set %>% select(userId, movieId, rating, title)
+test_set <- test_set %>% select(userId, movieId, rating, title)
 
 ################################
-# Define RMSE 
+# Define RMSE, MSE and MAE
 ################################
 # Root Mean Squared Error (RMSE) is the indicator used to
 # compare the predicted value with the actual outcome.
 # During the model development, we use the test set to
 # predict the outcome. When the model is ready, then we
 # use the 'validation' set.
+
+# Define Mean Absolute Error (MAE)
+MAE <- function(true_ratings, predicted_ratings){
+  mean(abs(true_ratings - predicted_ratings))
+}
+# Define Mean Squared Error (MSE)
+MSE <- function(true_ratings, predicted_ratings){
+  mean((true_ratings - predicted_ratings)^2)
+}
+# Define Root Mean Squared Error (RMSE)
 RMSE <- function(true_ratings, predicted_ratings){
   sqrt(mean((true_ratings - predicted_ratings)^2))
 }
+
+################################
+# Random Prediction
+################################
+set.seed(4321, sample.kind = "Rounding")
+# Create the probability of each rating
+p <- function(x, y) mean(y == x)
+rating <- seq(0.5,5,0.5)
+# Estimate the probability of each rating with Monte Carlo simulation
+B <- 10^3
+M <- replicate(B, {
+  s <- sample(train_set$rating, 100, replace = TRUE)
+  sapply(rating, p, y= s)
+})
+prob <- sapply(1:nrow(M), function(x) mean(M[x,]))
+# Predict random ratings
+y_hat_random <- sample(rating, size = nrow(test_set),
+                       replace = TRUE, prob = prob)
+# Create a table with the error results
+result <- tibble(Method = "Project Goal", RMSE = 0.8649, MSE = NA, MAE = NA)
+result <- bind_rows(result,
+                    tibble(Method = "Random prediction",
+                           RMSE = RMSE(test_set$rating, y_hat_random),
+                           MSE = MSE(test_set$rating, y_hat_random),
+                           MAE = MAE(test_set$rating, y_hat_random)))
+# Show the RMSE improvement
+result %>% knitr::kable()
 
 ################################
 # Linear Model
@@ -224,33 +346,45 @@ RMSE <- function(true_ratings, predicted_ratings){
 #-------------------------
 # The initial prediction is the mean of the ratings (mu).
 # y_hat = mu
+# Mean of observed values
 mu <- mean(train_set$rating)
-
-# Calculate the RMSE
-result <- tibble(Method = "Mean", RMSE = RMSE(test_set$rating, mu))
+# Update the error table
+result <- bind_rows(result,
+                    tibble(Method = "Mean",
+                           RMSE = RMSE(test_set$rating, mu),
+                           MSE = MSE(test_set$rating, mu),
+                           MAE = MAE(test_set$rating, mu)))
+# Show the RMSE improvement
+result %>% knitr::kable()
 
 #-------------------------
 # 2. Include movie effect (bi)
 #-------------------------
 # bi is the movie effect (bias) for movie i.
 # y_hat = mu + bi
-bi <- train_set %>% 
-  group_by(movieId) %>% 
+# Movie effects (bi)
+bi <- train_set %>%
+  group_by(movieId) %>%
   summarize(b_i = mean(rating - mu))
-bi
-
+head(bi)
 # Plot the distribution of movie effects
-qplot(b_i, data = bi, bins = 10, color = I("black"))
-
+bi %>% ggplot(aes(x = b_i)) +
+  geom_histogram(bins=10, col = I("black")) +
+  ggtitle("Movie Effect Distribution") +
+  xlab("Movie effect") +
+  ylab("Count") +
+  scale_y_continuous(labels = comma) +
+  theme_economist()
 # Predict the rating with mean + bi
-y_hat_bi <- mu + test_set %>% 
-  left_join(bi, by = "movieId") %>% 
+y_hat_bi <- mu + test_set %>%
+  left_join(bi, by = "movieId") %>%
   .$b_i
-
 # Calculate the RMSE
-result <- bind_rows(result, 
-                    tibble(Method = "Mean + bi", 
-                           RMSE = RMSE(test_set$rating, y_hat_bi)))
+result <- bind_rows(result,
+                    tibble(Method = "Mean + bi",
+                           RMSE = RMSE(test_set$rating, y_hat_bi),
+                           MSE = MSE(test_set$rating, y_hat_bi),
+                           MAE = MAE(test_set$rating, y_hat_bi)))
 
 # Show the RMSE improvement
 result %>% knitr::kable()
@@ -260,32 +394,38 @@ result %>% knitr::kable()
 #-------------------------
 # bu is the user effect (bias) for user u.
 # y_hat = mu + bi + bu
-bu <- train_set %>% 
+# User effect (bu)
+bu <- train_set %>%
   left_join(bi, by = 'movieId') %>%
   group_by(userId) %>%
   summarize(b_u = mean(rating - mu - b_i))
-
-# Predict the rating with mean + bi + bu
-y_hat_bi_bu <- test_set %>% 
+# Prediction
+y_hat_bi_bu <- test_set %>%
   left_join(bi, by='movieId') %>%
   left_join(bu, by='userId') %>%
   mutate(pred = mu + b_i + b_u) %>%
   .$pred
-
-result <- bind_rows(result, 
-                    tibble(Method = "Mean + bi + bu", 
-                           RMSE = RMSE(test_set$rating, y_hat_bi_bu)))
-
+# Update the results table
+result <- bind_rows(result,
+                    tibble(Method = "Mean + bi + bu",
+                           RMSE = RMSE(test_set$rating, y_hat_bi_bu),
+                           MSE = MSE(test_set$rating, y_hat_bi_bu),
+                           MAE = MAE(test_set$rating, y_hat_bi_bu)))
 # Show the RMSE improvement
 result %>% knitr::kable()
 
 # Plot the distribution of user effects
-train_set %>% 
-  group_by(userId) %>% 
-  summarize(b_u = mean(rating)) %>% 
+train_set %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating)) %>%
   filter(n()>=100) %>%
-  ggplot(aes(b_u)) + 
-  geom_histogram(bins = 30, color = "black")
+  ggplot(aes(b_u)) +
+  geom_histogram(color = "black") +
+  ggtitle("User Effect Distribution") +
+  xlab("User Bias") +
+  ylab("Count") +
+  scale_y_continuous(labels = comma) +
+  theme_economist()
 
 ################################
 # Checking the model result
@@ -352,36 +492,41 @@ train_set %>% count(movieId) %>%
 # Here, we find the lambda that provides the optimal  
 # prediction, i.e. that results in the lowest RMSE.
 regularization <- function(lambda, trainset, testset){
-
+  # Mean
   mu <- mean(trainset$rating)
-
-  b_i <- trainset %>% 
+  # Movie effect (bi)
+  b_i <- trainset %>%
     group_by(movieId) %>%
     summarize(b_i = sum(rating - mu)/(n()+lambda))
-  
-  b_u <- trainset %>% 
+  # User effect (bu)
+  b_u <- trainset %>%
     left_join(b_i, by="movieId") %>%
     filter(!is.na(b_i)) %>%
     group_by(userId) %>%
     summarize(b_u = sum(rating - b_i - mu)/(n()+lambda))
-  
-  predicted_ratings <- testset %>% 
+  # Prediction: mu + bi + bu
+  predicted_ratings <- testset %>%
     left_join(b_i, by = "movieId") %>%
     left_join(b_u, by = "userId") %>%
     filter(!is.na(b_i), !is.na(b_u)) %>%
     mutate(pred = mu + b_i + b_u) %>%
     pull(pred)
-  
   return(RMSE(predicted_ratings, testset$rating))
 }
+# Define a set of lambdas to tune
 lambdas <- seq(0, 10, 0.25)
-
-rmses <- sapply(lambdas, 
-                regularization, 
-                trainset = train_set, 
+# Update RMSES table
+rmses <- sapply(lambdas,
+                regularization,
+                trainset = train_set,
                 testset = test_set)
-
-qplot(lambdas, rmses)  
+# Plot the lambda x RMSE
+tibble(Lambda = lambdas, RMSE = rmses) %>%
+  ggplot(aes(x = Lambda, y = RMSE)) +
+  geom_point() +
+  ggtitle("Regularization",
+          subtitle = "Pick the penalization that gives the lowest RMSE.") +
+  theme_economist()
 
 # We pick the lambda that returns the lowest RMSE
 lambda <- lambdas[which.min(rmses)]
@@ -389,54 +534,31 @@ lambda
 
 # Then, we calculate the predicted rating using the
 # best parameters achieved from regularization.
+# achieved from regularization.
 mu <- mean(train_set$rating)
-
-b_i <- train_set %>% 
+# Movie effect (bi)
+b_i <- train_set %>%
   group_by(movieId) %>%
   summarize(b_i = sum(rating - mu)/(n()+lambda))
-
-b_u <- train_set %>% 
+# User effect (bu)
+b_u <- train_set %>%
   left_join(b_i, by="movieId") %>%
   group_by(userId) %>%
   summarize(b_u = sum(rating - b_i - mu)/(n()+lambda))
-
-y_hat_reg <- test_set %>% 
+# Prediction
+y_hat_reg <- test_set %>%
   left_join(b_i, by = "movieId") %>%
   left_join(b_u, by = "userId") %>%
   mutate(pred = mu + b_i + b_u) %>%
   pull(pred)
-
-result <- bind_rows(result, 
-                    tibble(Method = "Regularized bi and bu", 
-                           RMSE = RMSE(test_set$rating, y_hat_reg)))
-
+# Update the result table
+result <- bind_rows(result,
+                    tibble(Method = "Regularized bi and bu",
+                           RMSE = RMSE(test_set$rating, y_hat_reg),
+                           MSE = MSE(test_set$rating, y_hat_reg),
+                           MAE = MAE(test_set$rating, y_hat_reg)))
 # Show the RMSE improvement
 result %>% knitr::kable()
-
-# To see how the estimates shrink, let’s make a plot of the
-# regularized estimates versus the least squares estimates.
-
-tibble(original = bi$b_i, 
-       regularlized = b_i$b_i, 
-       n = b_i$n_i) %>%
-  ggplot(aes(original, regularlized, size=sqrt(n))) + 
-  geom_point(shape=1, alpha=0.5)
-
-# Now, let’s look at the top 10 best movies based on the penalized
-# estimates  
-
-train_set %>%
-  count(movieId) %>% 
-  left_join(movie_reg_avgs, by = "movieId") %>%
-  left_join(title, by = "movieId") %>%
-  arrange(desc(b_i)) %>% 
-  slice(1:10) %>% 
-  pull(title)
-
-y_hat <- train_set %>% 
-  left_join(movie_reg_avgs, by = "movieId") %>%
-  mutate(pred = mu + b_i) %>%
-  pull(pred)
 
 
 ################################
@@ -451,28 +573,32 @@ y_hat <- train_set %>%
 #
 # Vignette:
 # https://cran.r-project.org/web/packages/recosystem/vignettes/introduction.html
-if(!require(recosystem)) install.packages("recosystem", repos = "http://cran.us.r-project.org")
+if(!require(recosystem))
+  install.packages("recosystem", repos = "http://cran.us.r-project.org")
 set.seed(123, sample.kind = "Rounding") # This is a randomized algorithm
-train_data <-  with(train_set, data_memory(user_index = userId, item_index = movieId, rating = rating))
-test_data  <-  with(test_set,  data_memory(user_index = userId, item_index = movieId, rating = rating))
-r <-  recosystem::Reco()
-opts <-  r$tune(train_data, opts = list(dim = c(10, 20, 30), lrate = c(0.1, 0.2),
-                                        costp_l2 = c(0.01, 0.1), 
-                                        costq_l2 = c(0.01, 0.1),
-                                        nthread  = 4, niter = 10))
-opts
+# Convert the train and test sets into recosystem input format
+train_data <- with(train_set, data_memory(user_index = userId,
+                                          item_index = movieId,
+                                          rating = rating))
+test_data <- with(test_set, data_memory(user_index = userId,
+                                        item_index = movieId,
+                                        rating = rating))
+# Create the model object
+r <- recosystem::Reco()
+
+# Select the best tuning parameters
+opts <- r$tune(train_data, opts = list(dim = c(10, 20, 30),
+                                       lrate = c(0.1, 0.2),
+                                       costp_l2 = c(0.01, 0.1),
+                                       costq_l2 = c(0.01, 0.1),
+                                       nthread = 4, niter = 10))
+# Train the algorithm
 r$train(train_data, opts = c(opts$min, nthread = 4, niter = 20))
 
-# Calculate the prediction
-y_hat_recon <-  r$predict(test_data, out_memory())
-head(y_hat_recon, 10)
+# Calculate the predicted values
+y_hat_reco <- r$predict(test_data, out_memory())
+head(y_hat_reco, 10)
 
-result <- bind_rows(result, 
-                    tibble(Method = "Matrix Fatorization - recosystem", 
-                           RMSE = RMSE(test_set$rating, y_hat_recon)))
-
-# Show the RMSE improvement
-result %>% knitr::kable()
 ################################
 # Testing recommenderlab
 ################################
@@ -488,8 +614,6 @@ result %>% knitr::kable()
 # https://cran.r-project.org/web/packages/recommenderlab/vignettes/recommenderlab.pdf
 
 if(!require(recommenderlab)) install.packages("recommenderlab", repos = "http://cran.us.r-project.org")
-data(Jester5k)
-Jester5k
 head(as(Jester5k, "data.frame"))
 
 train_s <- with(edx, data.frame(user = userId, item = title, rating = rating))
@@ -501,34 +625,21 @@ r <- Recommender(train_s[1:62890], method = "POPULAR")
 names(recommenderlab::getModel(r))
 getModel(r)$topN
 
-#rec <- Recommender(r_ubcf, method = "UBCF")
-#rec
-#y_hat_top5   <- recommenderlab::predict(r, train_s[62891:69878], n=5)
 recom <- recommenderlab::predict(r, train_s[62891:69878], type="ratings")
 y_hat_reclab <- as(recom, "data.frame")
-head(y_hat_reclab)
-rm(recom)
-head(test_set)
-nrow(y_hat_reclab)
-
-RMSE(test_set$rating, y_hat_reclab)
-result <- bind_rows(result, 
-                    tibble(Method = "Matrix Fatorization - recosystem", 
-                           RMSE = RMSE(test_set$rating, y_hat_recon)))
-
-# Show the RMSE improvement
-result %>% knitr::kable()
-
 
 # Evaluation of predicted ratings
 # Split the data with 90% for training and 10% for testing.
 # We assume that ratings equal to or more than 4 are good
 # and should be recommended to the user.
 set.seed(123, sample.kind="Rounding")
+
+# The recommenderlab test is incomplete.
+# My computer crashes when I execute this code:
 e <- evaluationScheme(train_s, method="split", train=0.9,
                       given=-1, goodRating=4)
 e
-#16:17
+
 r1 <- Recommender(getData(e, "train"), "UBCF")
 r1
 
@@ -590,9 +701,11 @@ library(rpart)
 fit_rpart <- rpart(rating ~ userId + movieId, data = train_set)
 y_hat_rpart = predict(fit_rpart, test_set)
              
-result <- bind_rows(result, 
-                    tibble(Method = "rpart", 
-                           RMSE = RMSE(test_set$rating, y_hat_rpart)))
+result <- bind_rows(result,
+                    tibble(Method = "Regression tree - rpart",
+                           RMSE = RMSE(test_set$rating, y_hat_rpart),
+                           MSE = MSE(test_set$rating, y_hat_rpart),
+                           MAE = MAE(test_set$rating, y_hat_rpart)))
 
 # Show the RMSE 
 result %>% knitr::kable()
@@ -610,9 +723,11 @@ text(fit_rpart, cex = 0.75)
 fit_knn <- knn3(rating ~ userId + movieId, data = train_set)
 y_hat_knn <- predict(fit_knn, test_set)
 
-result <- bind_rows(result, 
-                    tibble(Method = "knn", 
-                           RMSE = RMSE(test_set$rating, y_hat_knn)))
+result <- bind_rows(result,
+                    tibble(Method = "knn",
+                           RMSE = RMSE(test_set$rating, y_hat_knn),
+                           MSE = MSE(test_set$rating, y_hat_knn),
+                           MAE = MAE(test_set$rating, y_hat_knn)))
 
 # Show the RMSE 
 result %>% knitr::kable()
@@ -633,9 +748,11 @@ y_hat_knn_hp <- sapply(1:nrow(y_hat_knn),
 
 head(y_hat_knn_hp)
 
-result <- bind_rows(result, 
-                    tibble(Method = "knn highest probability (HP)", 
-                           RMSE = RMSE(test_set$rating, y_hat_knn_hp)))
+result <- bind_rows(result,
+                    tibble(Method = "Knn high prob (hp)",
+                           RMSE = RMSE(test_set$rating, y_hat_knn_hp),
+                           MSE = MSE(test_set$rating, y_hat_knn_hp),
+                           MAE = MAE(test_set$rating, y_hat_knn_hp)))
 
 # Show the RMSE 
 result %>% knitr::kable()
@@ -650,9 +767,11 @@ y_hat_knn_wa <- sapply(1:length(ratings),
 
 head(y_hat_knn_wa)
 
-result <- bind_rows(result, 
-                    tibble(Method = "knn weighted average (WA)", 
-                           RMSE = RMSE(test_set$rating, y_hat_knn_wa)))
+result <- bind_rows(result,
+                    tibble(Method = "Knn weighted average (wa)",
+                           RMSE = RMSE(test_set$rating, y_hat_knn_wa),
+                           MSE = MSE(test_set$rating, y_hat_knn_wa),
+                           MAE = MAE(test_set$rating, y_hat_knn_wa)))
 # Show the RMSE 
 result %>% knitr::kable()
 
@@ -663,6 +782,8 @@ result %>% knitr::kable()
 #------------------
 # The dataset is very large, but there's only 5 predictors.
 # So, dimension reduction won't be very useful here.
+# We used matrix factorization with recosystem that provided
+# better result.
 pca <- prcomp(train_set)
 
 
@@ -679,89 +800,113 @@ pca <- prcomp(train_set)
 # and pick the one with the lowest RMSE.
 
 
-# Ensemble 1: regularization, rpart and knn highest probability
+# Ensemble 1: regularization and recosystem
 y_reg_reco <- tibble(regularization = y_hat_reg, 
-                             recosys = y_hat_recon) %>% rowMeans()
+                     recosys = y_hat_recon) %>% rowMeans()
 
-result <- bind_rows(result, 
-                    tibble(Method = "Reg + rpart + knn HP", 
-                           RMSE = RMSE(test_set$rating, y_reg_reco)))
+result <- bind_rows(result,
+                    tibble(Method = "LM Reg + recosystem",
+                           RMSE = RMSE(test_set$rating, y_reg_reco),
+                           MSE = MSE(test_set$rating, y_reg_reco),
+                           MAE = MAE(test_set$rating, y_reg_reco)))
 
-
-
-
-# Ensemble 1: regularization, rpart and knn highest probability
+# Ensemble 2: regularization, rpart and knn highest probability
 y_reg_rpart_knn_hp <- tibble(regularization = y_hat_reg, 
-                   rpart = y_hat_rpart, 
-                   knn = y_hat_knn_hp) %>% rowMeans()
+                             rpart = y_hat_rpart, 
+                             knn = y_hat_knn_hp) %>% rowMeans()
 
-result <- bind_rows(result, 
-                    tibble(Method = "Reg + rpart + knn HP", 
-                           RMSE = RMSE(test_set$rating, y_reg_rpart_knn_hp)))
+result <- bind_rows(result,
+                    tibble(Method = "LM Reg + rpart + knn",
+                           RMSE = RMSE(test_set$rating, y_reg_rpart_knn_hp),
+                           MSE = MSE(test_set$rating, y_reg_rpart_knn_hp),
+                           MAE = MAE(test_set$rating, y_reg_rpart_knn_hp)))
 
-# Ensemble 2: regularization and rpart
+# Ensemble 3: regularization and rpart
 y_reg_rpart <- tibble(regularization = y_hat_reg, 
-                   rpart = y_hat_rpart) %>% rowMeans()
+                      rpart = y_hat_rpart) %>% rowMeans()
 
-result <- bind_rows(result, 
-                    tibble(Method = "Reg + rpart", 
-                           RMSE = RMSE(test_set$rating, y_reg_rpart)))
+result <- bind_rows(result,
+                    tibble(Method = "LM reg + rpart",
+                           RMSE = RMSE(test_set$rating, y_reg_rpart),
+                           MSE = MSE(test_set$rating, y_reg_rpart),
+                           MAE = MAE(test_set$rating, y_reg_rpart)))
 
-# Ensemble 3: regularization and knn highest probability
+# Ensemble 4: regularization and knn highest probability
 y_reg_knn_hp <- tibble(regularization = y_hat_reg, 
                    knn = y_hat_knn_hp) %>% rowMeans()
 
-result <- bind_rows(result, 
-                    tibble(Method = "Reg + knn HP", 
-                           RMSE = RMSE(test_set$rating, y_reg_knn_hp)))
+result <- bind_rows(result,
+                    tibble(Method = "LM reg + knn hp",
+                           RMSE = RMSE(test_set$rating, y_reg_knn_hp),
+                           MSE = MSE(test_set$rating, y_reg_knn_hp),
+                           MAE = MAE(test_set$rating, y_reg_knn_hp)))
 
-# Ensemble 4: regularization, rpart and knn weighted average
+# Ensemble 5: regularization, rpart and knn weighted average
 y_reg_rpart_knn_wa <- tibble(regularization = y_hat_reg, 
                    rpart = y_hat_rpart, 
                    knn = y_hat_knn_wa) %>% rowMeans()
 
-result <- bind_rows(result, 
-                    tibble(Method = "Reg + rpart + knn WA", 
-                           RMSE = RMSE(test_set$rating, y_reg_rpart_knn_wa)))
+result <- bind_rows(result,
+                    tibble(Method = "LM reg + rpart + knn wa",
+                           RMSE = RMSE(test_set$rating, y_reg_rpart_knn_wa),
+                           MSE = MSE(test_set$rating, y_reg_rpart_knn_wa),
+                           MAE = MAE(test_set$rating, y_reg_rpart_knn_wa)))
 
-# Ensemble 5: regularization and knn weighted average
+# Ensemble 6: regularization and knn weighted average
 y_reg_knn_wa <- tibble(regularization = y_hat_reg, 
                     knn = y_hat_knn_wa) %>% rowMeans()
 
-result <- bind_rows(result, 
-                    tibble(Method = "Reg + knn WA", 
-                           RMSE = RMSE(test_set$rating, y_reg_knn_wa)))
+result <- bind_rows(result,
+                    tibble(Method = "LM reg + knn wa",
+                           RMSE = RMSE(test_set$rating, y_reg_knn_wa),
+                           MSE = MSE(test_set$rating, y_reg_knn_wa),
+                           MAE = MAE(test_set$rating, y_reg_knn_wa)))
 # Show the RMSE 
 result %>% knitr::kable()
 
 ################################
 # Final validation
 ################################
-# As we can see from the result table, regularization alone 
+# As we can see from the result table, regularization and recosystem
 # achieved the lowest RMSE.
 # So, finally we train the complete 'edx' set with the 
 # final model and calculate the RMSE in the 'validation' set.
 
-mu_edx <- mean(edx$rating)
+# recosystem is the best method, followed by linear model with
+# regularization.
+# Recommenderlab crashed the computer.
+# The 'train' function from 'caret' package uses too much memory.
+# knn and rpart aren't as good as LM with regularization.
+# Ensemble methods didn't reduce RMSE.
+# Here, we validate LM with regularzation and recosystem, the 2 winners.
+#
 
-b_i_final <- edx %>% 
+#-----------------
+# Final validation: Linear Model with Regularization.
+#-----------------
+mu_edx <- mean(edx$rating)
+# Movie effect (bi)
+b_i_edx <- edx %>%
   group_by(movieId) %>%
   summarize(b_i = sum(rating - mu_edx)/(n()+lambda))
-
-b_u_final <- edx %>% 
-  left_join(b_i_final, by="movieId") %>%
+# User effect (bu)
+b_u_edx <- edx %>%
+  left_join(b_i_edx, by="movieId") %>%
   group_by(userId) %>%
   summarize(b_u = sum(rating - b_i - mu_edx)/(n()+lambda))
 
-y_hat_final <- validation %>% 
-  left_join(b_i_final, by = "movieId") %>%
-  left_join(b_u_final, by = "userId") %>%
+# Prediction
+y_hat_edx <- validation %>%
+  left_join(b_i_edx, by = "movieId") %>%
+  left_join(b_u_edx, by = "userId") %>%
   mutate(pred = mu_edx + b_i + b_u) %>%
   pull(pred)
-
-result <- bind_rows(result, 
-                    tibble(Method = "Final (edx vs validation)", 
-                           RMSE = RMSE(validation$rating, y_hat_final)))
+# Update the results table
+result <- bind_rows(result,
+                    tibble(Method = "Final Regularization (edx vs validation)",
+                           RMSE = RMSE(validation$rating, y_hat_edx),
+                           MSE = MSE(validation$rating, y_hat_edx),
+                           MAE = MAE(validation$rating, y_hat_edx)))
 
 # Show the RMSE improvement
 result %>% knitr::kable()
@@ -771,59 +916,69 @@ result %>% knitr::kable()
 
 
 # Top 10 best movies
-validation %>% 
-  left_join(b_i_final, by = "movieId") %>%
-  left_join(b_u_final, by = "userId") %>% 
-  mutate(pred = mu_edx + b_i + b_u) %>% 
-  arrange(-pred) %>% 
-  group_by(title) %>% 
+validation %>%
+  left_join(b_i_edx, by = "movieId") %>%
+  left_join(b_u_edx, by = "userId") %>%
+  mutate(pred = mu_edx + b_i + b_u) %>%
+  arrange(-pred) %>%
+  group_by(title) %>%
   select(title) %>%
   head(10)
 
 # Top 10 worst movies
-validation %>% 
-  left_join(b_i_final, by = "movieId") %>%
-  left_join(b_u_final, by = "userId") %>% 
-  mutate(pred = mu_edx + b_i + b_u) %>% 
-  arrange(pred) %>% 
-  group_by(title) %>% 
+validation %>%
+  left_join(b_i_edx, by = "movieId") %>%
+  left_join(b_u_edx, by = "userId") %>%
+  mutate(pred = mu_edx + b_i + b_u) %>%
+  arrange(pred) %>%
+  group_by(title) %>%
   select(title) %>%
   head(10)
 
 #-----------------
-if(!require(recosystem)) install.packages("recosystem", repos = "http://cran.us.r-project.org")
-set.seed(123, sample.kind = "Rounding") # This is a randomized algorithm
-edx_final <-  with(edx, data_memory(user_index = userId, item_index = movieId, rating = rating))
-validation_final  <-  with(validation,  data_memory(user_index = userId, item_index = movieId, rating = rating))
-r <-  recosystem::Reco()
-opts <-  r$tune(edx_final, opts = list(dim = c(10, 20, 30), lrate = c(0.1, 0.2),
-                                        costp_l2 = c(0.01, 0.1), 
-                                        costq_l2 = c(0.01, 0.1),
-                                        nthread  = 4, niter = 10))
-opts
-r$train(edx_final, opts = c(opts$min, nthread = 4, niter = 20))
+# Final validation with Matrix Factorization - recosystem
+#-----------------
+set.seed(1234, sample.kind = "Rounding")
+# Convert 'edx' and 'validation' sets to recosystem input format
+edx_reco <- with(edx, data_memory(user_index = userId,
+                                  item_index = movieId,
+                                  rating = rating))
+validation_reco <- with(validation, data_memory(user_index = userId,
+                                                item_index = movieId,
+                                                rating = rating))
+# Create the model object
+r <- recosystem::Reco()
+# Tune the parameters
+opts <- r$tune(edx_reco, opts = list(dim = c(10, 20, 30),
+                                     lrate = c(0.1, 0.2),
+                                     costp_l2 = c(0.01, 0.1),
+                                     costq_l2 = c(0.01, 0.1),
+                                     nthread = 4, niter = 10))
+# Train the model
+r$train(edx_reco, opts = c(opts$min, nthread = 4, niter = 20))
 
 # Calculate the prediction
-y_hat_final <-  r$predict(validation_final, out_memory())
-head(y_hat_final, 10)
-
-result <- bind_rows(result, 
-                    tibble(Method = "Matrix Fatorization - recosystem", 
-                           RMSE = RMSE(validation$rating, y_hat_final)))
+y_hat_final_reco <- r$predict(validation_reco, out_memory())
+# Update the result table
+result <- bind_rows(result,
+                    tibble(Method = "Final Matrix Factorization - recosystem",
+                           RMSE = RMSE(validation$rating, y_hat_final_reco),
+                           MSE = MSE(validation$rating, y_hat_final_reco),
+                           MAE = MAE(validation$rating, y_hat_final_reco)))
 
 # Show the RMSE improvement
 result %>% knitr::kable()
 
 # Top 10 best movies:
-tibble(title = validation$title, rating = y_hat_final) %>%
-  arrange(-rating) %>% 
-  group_by(title) %>% 
+tibble(title = validation$title, rating = y_hat_final_reco) %>%
+  arrange(-rating) %>%
+  group_by(title) %>%
   select(title) %>%
   head(10)
 
 # Top 10 worst movies:
-tibble(title = validation$title, rating = y_hat_final) %>%
-  arrange(rating) %>% 
-  group_by(title) %>% 
+tibble(title = validation$title, rating = y_hat_final_reco) %>%
+  arrange(rating) %>%
+  group_by(title) %>%
   select(title) %>%
   head(10)
